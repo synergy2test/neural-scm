@@ -216,7 +216,7 @@ def main():
     data = generator.add_business_metrics(data)
     
     # Save to CSV
-    data.to_csv('supply_chain_data.csv', index=False)
+    data.to_csv('data/raw/supply_chain_data.csv', index=False)
     print(f"Generated {len(data)} records of supply chain data")
     print("\nSample of generated data:")
     print(data.head())
