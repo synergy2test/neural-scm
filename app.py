@@ -265,6 +265,10 @@ def create_scenario_interface():
 def run_scenario_analysis(name, date, price, promo, competitor, inventory, 
                          lead_time, fulfillment, seasonality, disruption, growth, ai_model):
     try:
+        # Early inventory validation
+        if inventory <= 0:
+            raise ValueError("⚠️ Warning: No available inventory specified. This will result in 100% stockout risk. Please set a positive inventory level.")
+            
         # Create scenario configuration
         scenario_config = {
             'price_multiplier': 1 + (price / 100),
@@ -342,6 +346,10 @@ def run_scenario_analysis(name, date, price, promo, competitor, inventory,
 
 def apply_scenario_changes(data, config):
     scenario_data = data.copy()
+    
+    # Store baseline values before applying changes
+    scenario_data['baseline_price'] = scenario_data['price'].copy()
+    scenario_data['baseline_demand'] = scenario_data['demand'].copy()
     
     # Apply multipliers
     scenario_data['price'] *= config['price_multiplier']
@@ -516,51 +524,130 @@ def format_ai_insights(report):
 
 # Helper functions for risk calculations
 def calculate_fulfillment_risk(scenario, predictions):
-    return float(np.mean(predictions > scenario['inventory_level']) * 100)
-
-def calculate_stockout_risk(scenario, predictions):
+    """Calculate fulfillment risk considering partial fulfillment capability"""
     try:
         if 'inventory_level' not in scenario.columns:
             print("Warning: inventory_level column not found in scenario data")
             return 0.0
-        return min(100, max(0, float(np.mean(scenario['inventory_level'] < predictions) * 100)))
+            
+        # Calculate the ratio of demand that can be fulfilled
+        inventory = np.maximum(0, scenario['inventory_level'])  # Ensure non-negative
+        demand = np.maximum(0, predictions)  # Ensure non-negative
+        fulfillment_ratio = np.minimum(1, inventory / np.where(demand > 0, demand, 1))
+        
+        # Risk is inverse of fulfillment capability
+        risk = (1 - np.mean(fulfillment_ratio)) * 100
+        return min(100, max(0, float(risk)))
+    except Exception as e:
+        print(f"Error calculating fulfillment risk: {str(e)}")
+        return 0.0
+
+def calculate_stockout_risk(scenario, predictions):
+    """Calculate stockout risk considering inventory coverage and magnitude of shortfall"""
+    try:
+        if 'inventory_level' not in scenario.columns:
+            print("⚠️ Critical: inventory_level column not found in scenario data")
+            return 100.0
+            
+        inventory = np.maximum(0, scenario['inventory_level'])
+        if np.all(inventory == 0):
+            print("⚠️ Critical: Zero inventory levels detected across all time periods. This indicates a severe supply chain risk.")
+            return 100.0
+            
+        demand = np.maximum(0, predictions)
+        
+        # Calculate days of inventory coverage
+        coverage_ratio = inventory / np.where(demand > 0, demand, 1)
+        
+        # Calculate magnitude of potential shortfall
+        shortfall = np.maximum(0, demand - inventory)
+        shortfall_ratio = np.where(demand > 0, shortfall / demand, 0)
+        
+        # Combine coverage and shortfall into overall risk
+        coverage_risk = np.mean(coverage_ratio < 1) * 60  # Weight: 60%
+        shortfall_risk = np.mean(shortfall_ratio) * 40    # Weight: 40%
+        
+        total_risk = coverage_risk + shortfall_risk
+        return min(100, max(0, float(total_risk)))
     except Exception as e:
         print(f"Error calculating stockout risk: {str(e)}")
         return 0.0
 
 def assess_lead_time_risk(scenario):
+    """Calculate lead time risk considering industry standards and variability"""
     try:
         if 'lead_time_days' not in scenario.columns:
             print("Warning: lead_time_days column not found in scenario data")
             return 0.0
-        return min(100, max(0, float(np.mean(scenario['lead_time_days'] > scenario['lead_time_days'].mean()) * 100)))
+            
+        lead_times = scenario['lead_time_days'].values  # Convert to numpy array
+        
+        # Consider both absolute magnitude and variability
+        mean_lt = np.mean(lead_times)
+        std_lt = np.std(lead_times)
+        
+        # Risk factors:
+        # 1. Base risk from mean lead time (longer = higher risk)
+        base_risk = min(60, mean_lt / 30 * 40)  # Cap at 60%, assume 30 days is baseline
+        
+        # 2. Variability risk (higher variability = higher risk)
+        variability_risk = min(40, (std_lt / mean_lt) * 40 if mean_lt > 0 else 0)
+        
+        total_risk = base_risk + variability_risk
+        return min(100, max(0, float(total_risk)))
     except Exception as e:
         print(f"Error calculating lead time risk: {str(e)}")
         return 0.0
 
 def calculate_price_sensitivity(scenario, predictions):
+    """Calculate price sensitivity as elasticity measure"""
     try:
-        if 'price' not in scenario.columns:
-            print("Warning: price column not found in scenario data")
+        if 'price' not in scenario.columns or 'baseline_price' not in scenario.columns:
+            print("Warning: price columns not found in scenario data")
             return 0.0
-        pred_flat = np.array(predictions).flatten()
-        return min(1, max(-1, float(np.corrcoef(scenario['price'], pred_flat)[0, 1])))
+            
+        # Calculate percentage changes
+        price_change = (scenario['price'] - scenario['baseline_price']) / scenario['baseline_price']
+        demand_change = (predictions - scenario['baseline_demand']) / scenario['baseline_demand']
+        
+        # Calculate price elasticity where price change is non-zero
+        mask = price_change != 0
+        elasticity = np.where(mask, demand_change / price_change, 0)
+        
+        # Normalize to 0-1 range and handle outliers
+        normalized = np.clip(abs(np.mean(elasticity)), 0, 2) / 2
+        return float(normalized)
     except Exception as e:
         print(f"Error calculating price sensitivity: {str(e)}")
         return 0.0
 
 def calculate_overall_risk(scenario, predictions, config):
+    """Calculate overall risk using weighted components and proper normalization"""
     try:
         print("Calculating component risks...")
+        
+        # Calculate component risks
         stockout = calculate_stockout_risk(scenario, predictions)
         print(f"Stockout risk: {stockout}")
+        
         lead_time = assess_lead_time_risk(scenario)
         print(f"Lead time risk: {lead_time}")
-        price = abs(calculate_price_sensitivity(scenario, predictions))
+        
+        price = calculate_price_sensitivity(scenario, predictions)
         print(f"Price sensitivity: {price}")
-        overall = min(100, max(0, float((stockout + lead_time * 0.5 + price * 50) / 2.5)))
+        
+        # Weight the components (total = 100):
+        # - Stockout: 40% (most critical)
+        # - Lead Time: 35%
+        # - Price Sensitivity: 25%
+        overall = (
+            stockout * 0.40 +
+            lead_time * 0.35 +
+            (price * 100) * 0.25  # Convert price sensitivity to percentage
+        )
+        
         print(f"Overall risk: {overall}")
-        return overall
+        return min(100, max(0, float(overall)))
     except Exception as e:
         print(f"Error calculating overall risk: {str(e)}")
         return 0.0
