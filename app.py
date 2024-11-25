@@ -69,10 +69,14 @@ def create_scenario_interface():
         with gr.Row():
             with gr.Column():
                 scenario_selector = gr.Dropdown(
-                    choices=list_scenarios(),
+                    choices=["New Scenario"],  # Start with just New Scenario
                     label="Load Scenario",
-                    value="New Scenario"
+                    value="New Scenario",
+                    interactive=True
                 )
+                
+                # Update choices after component is created
+                scenario_selector.choices = list_scenarios()
                 
                 scenario_name = gr.Textbox(
                     label="Scenario Name",
@@ -265,9 +269,11 @@ def create_scenario_interface():
 def run_scenario_analysis(name, date, price, promo, competitor, inventory, 
                          lead_time, fulfillment, seasonality, disruption, growth, ai_model):
     try:
-        # Early inventory validation
+        # Early inventory validation - now returns warning instead of error
+        inventory_warning = None
         if inventory <= 0:
-            raise ValueError("⚠️ Warning: No available inventory specified. This will result in 100% stockout risk. Please set a positive inventory level.")
+            inventory_warning = "⚠️ Warning: No available inventory specified. This will result in 100% stockout risk."
+            print(inventory_warning)
             
         # Create scenario configuration
         scenario_config = {
@@ -322,7 +328,7 @@ def run_scenario_analysis(name, date, price, promo, competitor, inventory,
         
         print("Generating results...")
         # Generate results
-        return generate_scenario_results(name, baseline_data, scenario_data, scenario_predictions, scenario_config, ai_model)
+        return generate_scenario_results(name, baseline_data, scenario_data, scenario_predictions, scenario_config, ai_model, inventory_warning)
     except Exception as e:
         print(f"Error in run_scenario_analysis: {str(e)}")
         empty_fig = Figure()
@@ -337,11 +343,12 @@ def run_scenario_analysis(name, date, price, promo, competitor, inventory,
             }]
         )
         return (
-            {"error": str(e)},
-            empty_fig,
-            empty_fig,
-            f"⚠️ Error occurred while running scenario analysis: {str(e)}",
-            {"error": str(e)}
+            {"error": str(e)},  # status
+            "Error calculating metrics",  # metrics
+            empty_fig,          # plot
+            empty_fig,          # importance
+            "Error generating insights",  # insights
+            {"error": str(e)}   # risks
         )
 
 def apply_scenario_changes(data, config):
@@ -353,7 +360,14 @@ def apply_scenario_changes(data, config):
     
     # Apply multipliers
     scenario_data['price'] *= config['price_multiplier']
-    scenario_data['inventory_level'] *= config['inventory_multiplier']
+    
+    # Handle inventory differently - use percentage of original inventory
+    if config['inventory_multiplier'] > 0:
+        scenario_data['inventory_level'] *= config['inventory_multiplier']
+    else:
+        # Set a minimum inventory level based on demand
+        scenario_data['inventory_level'] = scenario_data['demand'] * 0.1  # 10% of demand as minimum
+        
     scenario_data['lead_time_days'] *= config['lead_time_multiplier']
     
     # Apply external factors
@@ -366,7 +380,7 @@ def apply_scenario_changes(data, config):
     
     return scenario_data
 
-def generate_scenario_results(name, baseline, scenario, predictions, config, ai_model):
+def generate_scenario_results(name, baseline, scenario, predictions, config, ai_model, inventory_warning):
     try:
         # Calculate non-risk metrics first
         metrics = {
@@ -392,7 +406,10 @@ def generate_scenario_results(name, baseline, scenario, predictions, config, ai_
         importance_plot = create_feature_importance_plot(feature_importance)
         
         # Get AI insights
-        insights = "Calculating insights..."
+        insights = ""
+        if inventory_warning:
+            insights = inventory_warning + "\n\n"
+            
         if ai_model != "None":
             explainer = AIExplainer()
             analysis_report = explainer.generate_explanation_report(
@@ -402,10 +419,10 @@ def generate_scenario_results(name, baseline, scenario, predictions, config, ai_
                 use_openai=(ai_model == "OpenAI"),
                 use_ollama=(ai_model == "Ollama")
             )
-            insights = format_ai_insights(analysis_report)
+            insights += format_ai_insights(analysis_report)
         else:
-            insights = "AI insights disabled"
-        
+            insights += "AI insights disabled"
+            
         # Calculate risks
         print("Calculating risks...")
         try:
@@ -551,7 +568,7 @@ def calculate_stockout_risk(scenario, predictions):
             
         inventory = np.maximum(0, scenario['inventory_level'])
         if np.all(inventory == 0):
-            print("⚠️ Critical: Zero inventory levels detected across all time periods. This indicates a severe supply chain risk.")
+            print("⚠️ Critical: Zero inventory levels detected across all time periods.")
             return 100.0
             
         demand = np.maximum(0, predictions)
@@ -564,14 +581,14 @@ def calculate_stockout_risk(scenario, predictions):
         shortfall_ratio = np.where(demand > 0, shortfall / demand, 0)
         
         # Combine coverage and shortfall into overall risk
-        coverage_risk = np.mean(coverage_ratio < 1) * 60  # Weight: 60%
+        coverage_risk = np.clip(1 - np.mean(coverage_ratio), 0, 1) * 60  # Weight: 60%
         shortfall_risk = np.mean(shortfall_ratio) * 40    # Weight: 40%
         
         total_risk = coverage_risk + shortfall_risk
-        return min(100, max(0, float(total_risk)))
+        return min(100, max(0, float(total_risk * 100)))
     except Exception as e:
         print(f"Error calculating stockout risk: {str(e)}")
-        return 0.0
+        return 100.0
 
 def assess_lead_time_risk(scenario):
     """Calculate lead time risk considering industry standards and variability"""
@@ -580,18 +597,17 @@ def assess_lead_time_risk(scenario):
             print("Warning: lead_time_days column not found in scenario data")
             return 0.0
             
-        lead_times = scenario['lead_time_days'].values  # Convert to numpy array
+        lead_times = np.array(scenario['lead_time_days'])
         
-        # Consider both absolute magnitude and variability
-        mean_lt = np.mean(lead_times)
-        std_lt = np.std(lead_times)
+        # Calculate risk based on both absolute lead time and variability
+        avg_lead_time = np.mean(lead_times)
+        lead_time_std = np.std(lead_times)
         
-        # Risk factors:
-        # 1. Base risk from mean lead time (longer = higher risk)
-        base_risk = min(60, mean_lt / 30 * 40)  # Cap at 60%, assume 30 days is baseline
+        # Risk increases with longer lead times (assume 7 days is standard)
+        base_risk = np.clip((avg_lead_time - 7) / 14, 0, 1) * 60  # Max 60% risk from absolute time
         
-        # 2. Variability risk (higher variability = higher risk)
-        variability_risk = min(40, (std_lt / mean_lt) * 40 if mean_lt > 0 else 0)
+        # Risk increases with variability
+        variability_risk = np.clip(lead_time_std / avg_lead_time, 0, 1) * 40  # Max 40% risk from variability
         
         total_risk = base_risk + variability_risk
         return min(100, max(0, float(total_risk)))
