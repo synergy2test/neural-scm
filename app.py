@@ -86,7 +86,7 @@ def create_scenario_interface():
                     placeholder="YYYY-MM-DD"
                 )
                 
-                with gr.Box():
+                with gr.Column():
                     gr.Markdown("### 🎯 Market Conditions")
                     price_change = gr.Slider(
                         label="Price Change (%)",
@@ -103,7 +103,7 @@ def create_scenario_interface():
                         step=5
                     )
                 
-                with gr.Box():
+                with gr.Column():
                     gr.Markdown("### 📦 Supply Chain Parameters")
                     inventory_level = gr.Slider(
                         label="Inventory Level Change (%)",
@@ -127,7 +127,7 @@ def create_scenario_interface():
                         step=1
                     )
                 
-                with gr.Box():
+                with gr.Column():
                     gr.Markdown("### 🌍 External Factors")
                     competitor_action = gr.Radio(
                         label="Competitor Action",
@@ -152,7 +152,7 @@ def create_scenario_interface():
                         step=5
                     )
                 
-                with gr.Box():
+                with gr.Column():
                     gr.Markdown("### 🤖 AI Configuration")
                     ai_model = gr.Radio(
                         label="AI Model for Insights",
@@ -167,7 +167,7 @@ def create_scenario_interface():
             
             # Right column for results
             with gr.Column():
-                with gr.Box():
+                with gr.Column():
                     metrics_display = gr.Markdown(label="Key Metrics")
                     risk_analysis = gr.Markdown(label="Risk Assessment")
                 
