@@ -11,13 +11,6 @@ import os
 import json
 
 def create_scenario_interface():
-    app = gr.Interface(
-        fn=None,
-        inputs=None,
-        outputs=None,
-        title="🏭 Supply Chain Scenario Planner"
-    )
-
     with gr.Blocks() as app:
         gr.Markdown("# 🏭 Supply Chain Scenario Planner")
         
